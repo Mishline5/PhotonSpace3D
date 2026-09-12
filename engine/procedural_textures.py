@@ -1,61 +1,83 @@
 """Procedural PBR texture generation: numpy + Pillow only, entirely in
 memory - no image files read from or written to disk, no external assets
 downloaded. Consistent with this engine's "from scratch" ethos (procedural
-primitives in primitives.py, hand-written shaders) extended to surface
-detail: every material below is a subtle, desaturated variation on the exact
-scalar tones main.py already used (GROUND_ALBEDO/SPHERE_ALBEDO/etc.), not a
-new stylistic direction.
+primitives in primitives.py, hand-written shaders) extended to surface detail.
 
 All albedo/roughness/normal arrays are produced in the same linear color
 space the rest of the engine's HDR pipeline already assumes (see
-forward.frag - there is no sRGB decode anywhere in this pipeline). A texture
-generated here must therefore be tuned in that same linear space (mean
-around the scalar constant it's replacing), not "what looks right on a
-gamma-encoded monitor" - and uploaded to GL without any sRGB internal format.
+forward.frag - there is no sRGB decode anywhere in this pipeline).
+
+TILING: every generator here produces a *seamlessly tileable* field. The
+value/fBm noise samples a periodic integer lattice with modulo-wrapped cell
+indices (see value_noise_2d) so the left edge matches the right and the top
+matches the bottom exactly - the previous PIL-resize-of-a-random-lattice
+approach did NOT wrap and showed a visible seam wherever a mesh's UVs
+repeated (the ground plane tiles its UVs many times), which read as a
+"weird repeating" artifact. Worley wraps toroidally; normals use wrapped
+central differences. So a texture applied to a large tiled surface has no
+seams.
 """
 from __future__ import annotations
 
 import numpy as np
-from PIL import Image
 
 
-def value_noise_2d(shape: tuple[int, int], cell_size: float, seed: int) -> np.ndarray:
-    """Smooth lattice noise: random values on a coarse grid, bilinearly
-    upsampled to `shape`. Resized in 32-bit float mode (PIL mode "F"), not
-    quantized to 8-bit first, so this stays smooth even after several
-    octaves are summed (fractal_value_noise) without banding."""
+def value_noise_2d(shape: tuple[int, int], cells: int, seed: int) -> np.ndarray:
+    """Seamlessly tileable smooth value noise: a `cells`x`cells` periodic
+    lattice of random values, smoothstep-interpolated up to `shape`. Cell
+    indices wrap with modulo, and the sample domain spans exactly [0, cells)
+    in each axis, so the result tiles perfectly (edge N matches edge 0)."""
     h, w = shape
+    cells = max(int(cells), 1)
     rng = np.random.default_rng(seed)
-    grid_h = max(int(h / cell_size) + 2, 2)
-    grid_w = max(int(w / cell_size) + 2, 2)
-    lattice = rng.uniform(0.0, 1.0, size=(grid_h, grid_w)).astype(np.float32)
-    img = Image.fromarray(lattice, mode="F").resize((w, h), Image.BILINEAR)
-    return np.asarray(img, dtype=np.float32)
+    grid = rng.uniform(0.0, 1.0, size=(cells, cells)).astype(np.float32)
+
+    ys = np.linspace(0.0, cells, h, endpoint=False)
+    xs = np.linspace(0.0, cells, w, endpoint=False)
+    y0 = np.floor(ys).astype(np.int64)
+    x0 = np.floor(xs).astype(np.int64)
+    fy = (ys - y0).astype(np.float32)
+    fx = (xs - x0).astype(np.float32)
+    y1 = (y0 + 1) % cells
+    x1 = (x0 + 1) % cells
+    y0 %= cells
+    x0 %= cells
+
+    # Smoothstep fade so cell boundaries are C1-continuous (no lattice creases).
+    fy = fy * fy * (3.0 - 2.0 * fy)
+    fx = fx * fx * (3.0 - 2.0 * fx)
+
+    g00 = grid[np.ix_(y0, x0)]
+    g01 = grid[np.ix_(y0, x1)]
+    g10 = grid[np.ix_(y1, x0)]
+    g11 = grid[np.ix_(y1, x1)]
+    fx_row = fx[None, :]
+    top = g00 * (1.0 - fx_row) + g01 * fx_row
+    bot = g10 * (1.0 - fx_row) + g11 * fx_row
+    fy_col = fy[:, None]
+    return (top * (1.0 - fy_col) + bot * fy_col).astype(np.float32)
 
 
 def fractal_value_noise(shape: tuple[int, int], octaves: int, seed: int,
-                         base_cell: float, persistence: float = 0.5) -> np.ndarray:
-    """fBm: sum of `octaves` value-noise layers at halving cell size, each
-    weighted less than the last - low-frequency shape from the coarse
-    octaves, fine grain from the later ones."""
+                         base_cells: int, persistence: float = 0.5) -> np.ndarray:
+    """fBm: sum of octaves at doubling lattice resolution (base_cells,
+    2*base_cells, ...). Every octave uses an integer cell count so every
+    octave - and thus the sum - stays seamlessly tileable."""
     result = np.zeros(shape, dtype=np.float32)
     amplitude = 1.0
-    total_amplitude = 0.0
-    cell = base_cell
+    total = 0.0
+    cells = max(int(base_cells), 1)
     for i in range(octaves):
-        result += value_noise_2d(shape, max(cell, 2.0), seed + i * 7919) * amplitude
-        total_amplitude += amplitude
+        result += value_noise_2d(shape, cells, seed + i * 7919) * amplitude
+        total += amplitude
         amplitude *= persistence
-        cell = max(cell / 2.0, 2.0)
-    return result / total_amplitude
+        cells *= 2
+    return result / max(total, 1e-6)
 
 
 def worley_noise_2d(shape: tuple[int, int], num_points: int, seed: int) -> np.ndarray:
-    """Cellular noise: distance from each pixel to the nearest of
-    `num_points` random feature points, normalized to [0, 1]. Distances wrap
-    toroidally (each axis independently) so the result tiles seamlessly -
-    the ground plane's UVs already repeat 12x (see primitives.make_plane),
-    and a non-tiling noise field would show an ugly seam on that surface."""
+    """Cellular noise: distance to nearest of `num_points` feature points,
+    normalized to [0, 1]. Distances wrap toroidally so it tiles seamlessly."""
     h, w = shape
     rng = np.random.default_rng(seed)
     pts_x = rng.uniform(0.0, w, size=num_points).astype(np.float32)
@@ -68,31 +90,27 @@ def worley_noise_2d(shape: tuple[int, int], num_points: int, seed: int) -> np.nd
         dx = np.minimum(dx, w - dx)
         dy = np.abs(ys - py)
         dy = np.minimum(dy, h - dy)
-        dist = np.sqrt(dx * dx + dy * dy)
-        min_dist = np.minimum(min_dist, dist)
+        min_dist = np.minimum(min_dist, np.sqrt(dx * dx + dy * dy))
 
     max_possible = float(np.sqrt((w * 0.5) ** 2 + (h * 0.5) ** 2))
     return np.clip(min_dist / max_possible, 0.0, 1.0).astype(np.float32)
 
 
 def _stretch_axis0(arr: np.ndarray, factor: int) -> np.ndarray:
-    """Smear `arr` along axis 0 (down-then-up resize) while leaving axis 1
-    untouched - the anisotropic-blur trick behind the brushed-metal streaks:
-    axis 1 (across the grain) keeps full detail, axis 0 (along the grain)
-    gets heavily blurred, producing directional streaks from isotropic
-    input noise without a bespoke directional convolution."""
+    """Smear along axis 0 with a wrapped box average - the anisotropic
+    brushed-metal streak trick, kept tileable (np.take with mode='wrap')."""
     h, w = arr.shape
-    img = Image.fromarray(arr, mode="F")
-    small = img.resize((w, max(h // factor, 1)), Image.BILINEAR)
-    back = small.resize((w, h), Image.BILINEAR)
-    return np.asarray(back, dtype=np.float32)
+    factor = max(int(factor), 1)
+    acc = np.zeros_like(arr)
+    for offset in range(-factor, factor + 1):
+        idx = (np.arange(h) + offset) % h
+        acc += arr[idx]
+    return (acc / (2 * factor + 1)).astype(np.float32)
 
 
 def height_to_normal(height: np.ndarray, strength: float = 1.0) -> np.ndarray:
-    """Tangent-space normal map (RGB in [0, 1], decodes to XYZ in [-1, 1] the
-    same way forward.frag's normal-mapping term expects: `texture(...).xyz *
-    2.0 - 1.0`) from a height field, via wrapped (tileable) central
-    differences - matches the toroidal noise above, no seam at the edges."""
+    """Tangent-space normal map (RGB in [0,1] -> XYZ in [-1,1]) from a height
+    field via wrapped central differences (tileable, matches the noise)."""
     dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * 0.5
     dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * 0.5
     nx = -dx * strength
@@ -100,14 +118,36 @@ def height_to_normal(height: np.ndarray, strength: float = 1.0) -> np.ndarray:
     nz = np.ones_like(height)
     length = np.sqrt(nx * nx + ny * ny + nz * nz)
     nx, ny, nz = nx / length, ny / length, nz / length
-    normal = np.stack([nx * 0.5 + 0.5, ny * 0.5 + 0.5, nz * 0.5 + 0.5], axis=-1)
-    return normal.astype(np.float32)
+    return np.stack([nx * 0.5 + 0.5, ny * 0.5 + 0.5, nz * 0.5 + 0.5], axis=-1).astype(np.float32)
+
+
+def make_noise_textures(base_color: tuple[float, float, float],
+                        base_roughness: float = 0.6,
+                        base_metallic: float = 0.0,
+                        grain: float = 8.0,
+                        strength: float = 1.0,
+                        seed: int = 1,
+                        size: int = 512) -> dict[str, np.ndarray]:
+    """Generic adjustable grain, derived from a material's own base color -
+    this is the "Noise" texture option the editor exposes on any object.
+
+    grain    -> lattice cell count (higher = finer speckle)
+    strength -> 0 (no visible texture) .. ~2 (strong)
+    """
+    cells = max(int(round(grain)), 2)
+    base = fractal_value_noise((size, size), octaves=4, seed=seed, base_cells=cells)
+    variation = (base - base.mean()) * strength
+
+    tone = np.array(base_color, dtype=np.float32)
+    albedo = np.clip(tone[None, None, :] + variation[..., None] * 0.12, 0.01, 0.99).astype(np.float32)
+    roughness = np.clip(base_roughness + variation * 0.22, 0.04, 0.99).astype(np.float32)
+    metallic = np.full((size, size), float(np.clip(base_metallic, 0.0, 1.0)), dtype=np.float32)
+    normal = height_to_normal(base, strength=0.5 * strength)
+    return {"albedo": albedo, "roughness": roughness, "metallic": metallic, "normal": normal}
 
 
 def make_concrete_textures(size: int = 512, seed: int = 1) -> dict[str, np.ndarray]:
-    """Ground/cube tone (see main.py's GROUND_ALBEDO/CUBE_ALBEDO comments):
-    weathered concrete/stone - coarse fBm shape plus finer Worley pitting."""
-    base = fractal_value_noise((size, size), octaves=5, seed=seed, base_cell=size / 8)
+    base = fractal_value_noise((size, size), octaves=5, seed=seed, base_cells=8)
     pitting = worley_noise_2d((size, size), num_points=max(size // 16, 8), seed=seed + 1)
     variation = base * 0.7 + pitting * 0.3
     variation -= variation.mean()
@@ -120,10 +160,8 @@ def make_concrete_textures(size: int = 512, seed: int = 1) -> dict[str, np.ndarr
 
 
 def make_brushed_metal_textures(size: int = 512, seed: int = 2) -> dict[str, np.ndarray]:
-    """Sphere tone (SPHERE_ALBEDO): brushed metal - fine noise smeared into
-    directional streaks (see _stretch_axis0)."""
-    fine = value_noise_2d((size, size), cell_size=2.0, seed=seed)
-    streaked = _stretch_axis0(fine, factor=32)
+    fine = value_noise_2d((size, size), cells=max(size // 2, 4), seed=seed)
+    streaked = _stretch_axis0(fine, factor=max(size // 16, 1))
     variation = streaked - streaked.mean()
 
     tone = np.array([0.55, 0.55, 0.57], dtype=np.float32)
@@ -135,9 +173,7 @@ def make_brushed_metal_textures(size: int = 512, seed: int = 2) -> dict[str, np.
 
 
 def make_rubber_textures(size: int = 512, seed: int = 3) -> dict[str, np.ndarray]:
-    """Cylinder tone (CYLINDER_ALBEDO): dark matte rubber/resin - fine, low-
-    contrast fBm grain."""
-    grain = fractal_value_noise((size, size), octaves=4, seed=seed, base_cell=size / 32)
+    grain = fractal_value_noise((size, size), octaves=4, seed=seed, base_cells=32)
     variation = grain - grain.mean()
 
     tone = np.array([0.13, 0.12, 0.12], dtype=np.float32)
@@ -148,10 +184,7 @@ def make_rubber_textures(size: int = 512, seed: int = 3) -> dict[str, np.ndarray
 
 
 def make_plaster_textures(size: int = 512, seed: int = 4) -> dict[str, np.ndarray]:
-    """New neutral wall tone: pale plaster/render - broad, gentle fBm, no
-    fine grain (a trowelled wall reads as smooth from any distance the
-    demo's camera gets to)."""
-    base = fractal_value_noise((size, size), octaves=5, seed=seed, base_cell=size / 10)
+    base = fractal_value_noise((size, size), octaves=5, seed=seed, base_cells=10)
     variation = base - base.mean()
 
     tone = np.array([0.72, 0.71, 0.68], dtype=np.float32)

@@ -20,9 +20,11 @@ import numpy as np
 import moderngl
 
 from .scene import Material
-from .procedural_textures import MATERIAL_PRESETS
+from .procedural_textures import MATERIAL_PRESETS, make_noise_textures
 
 DEFAULT_NORMAL = (0.5, 0.5, 1.0)  # decodes to tangent-space (0, 0, 1): a true no-op, see forward.frag
+
+_MAP_ATTRS = ("albedo_map", "roughness_map", "metallic_map", "normal_map")
 
 
 class MaterialTextures:
@@ -78,12 +80,26 @@ def upload_map(ctx: moderngl.Context, array: np.ndarray) -> moderngl.Texture:
     return tex
 
 
+def clear_maps(material: Material) -> None:
+    """Release and drop any GPU texture maps, reverting the material to its
+    scalar albedo/roughness/metallic (the forward pass falls back to the 1x1
+    default textures). Releasing avoids leaking a texture every time the
+    editor regenerates noise on a slider drag."""
+    for attr in _MAP_ATTRS:
+        tex = getattr(material, attr)
+        if tex is not None:
+            try:
+                tex.release()
+            except Exception:
+                pass
+            setattr(material, attr, None)
+
+
 def apply_material_preset(ctx: moderngl.Context, material: Material, preset_name: str,
                            size: int = 512, seed: int | None = None) -> None:
     """Generates and uploads one of procedural_textures.MATERIAL_PRESETS
-    onto `material`'s map fields - the one place both main.py's demo scene
-    and the editing/ material panel apply a named preset, so the two can
-    never drift apart into different-looking "concrete"."""
+    onto `material`'s map fields - used by main.py's demo scene."""
+    clear_maps(material)
     factory = MATERIAL_PRESETS[preset_name]
     maps = factory(size=size) if seed is None else factory(size=size, seed=seed)
     material.albedo_map = upload_map(ctx, maps["albedo"])
@@ -91,3 +107,23 @@ def apply_material_preset(ctx: moderngl.Context, material: Material, preset_name
     if "metallic" in maps:
         material.metallic_map = upload_map(ctx, maps["metallic"])
     material.normal_map = upload_map(ctx, maps["normal"])
+    material.texture_kind = "noise"
+
+
+def apply_texture_kind(ctx: moderngl.Context, material: Material, size: int = 256) -> None:
+    """Regenerate the material's maps to match its `texture_kind`:
+    - "none":  drop all maps (flat scalar albedo/roughness/metallic)
+    - "noise": generic adjustable grain derived from the material's own
+               current albedo/roughness/metallic + noise_grain/noise_strength
+    Called by the editor Properties panel whenever the kind or a noise
+    parameter (or the base color) changes."""
+    clear_maps(material)
+    if material.texture_kind == "noise":
+        maps = make_noise_textures(
+            material.albedo, material.roughness, material.metallic,
+            grain=material.noise_grain, strength=material.noise_strength, size=size,
+        )
+        material.albedo_map = upload_map(ctx, maps["albedo"])
+        material.roughness_map = upload_map(ctx, maps["roughness"])
+        material.metallic_map = upload_map(ctx, maps["metallic"])
+        material.normal_map = upload_map(ctx, maps["normal"])

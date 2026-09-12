@@ -19,8 +19,11 @@ MAX_LEVEL = 3
 # PCSS replaces the old fixed-radius PCF wholesale (single code path, no
 # "old PCF" kept alongside it) - the search radius is deliberately smaller
 # than the max penumbra radius since it only needs to find *whether* nearby
-# blockers exist, not resolve the full soft-shadow footprint.
-SHADOW_PARAMS = {0: (0, 0, 0), 1: (512, 2, 2), 2: (1024, 3, 4), 3: (2048, 4, 6)}
+# blockers exist, not resolve the full soft-shadow footprint. Resolutions
+# bumped and max penumbra tightened vs. the first pass so shadows read
+# deeper and crisper ("pas assez profondes, pas trop dégradées") without
+# going razor-hard.
+SHADOW_PARAMS = {0: (0, 0, 0), 1: (1024, 2, 2), 2: (2048, 2, 3), 3: (4096, 3, 4)}
 # level -> (hemisphere sample count, out of the shader's compiled-in max)
 SSAO_PARAMS = {0: (0,), 1: (8,), 2: (16,), 3: (24,)}
 # level -> number of jittered reflection rays (1 = sharp mirror-like, more = softer)
@@ -39,6 +42,10 @@ MSAA_PARAMS = {0: (0,), 1: (2,), 2: (4,), 3: (8,)}
 # spatial average - the real cost/quality axis here, unlike most of this
 # pass's cost which is one fixed 1x1 adapt step regardless of level.
 AUTOEXPOSURE_PARAMS = {0: (0,), 1: (5,), 2: (4,), 3: (3,)}
+# level -> dust particle count. Tiny drifting motes; 0 = disabled. The size/
+# speed/opacity/color of the motes are separate continuous fields below so
+# the level is purely "how many".
+DUST_PARAMS = {0: (0,), 1: (1500,), 2: (4000,), 3: (9000,)}
 
 
 @dataclass
@@ -50,6 +57,14 @@ class QualitySettings:
     fog_level: int = 1
     msaa_level: int = 2
     auto_exposure_level: int = 2
+    dust_level: int = 0                 # 0 = off; dust is opt-in
+    # Dust mote tuning (continuous, independent of the count level above).
+    dust_size: float = 1.4             # on-screen mote size multiplier (kept small)
+    dust_speed: float = 1.0            # drift speed multiplier
+    dust_opacity: float = 0.5          # per-mote alpha
+    dust_color: tuple[float, float, float] = (0.82, 0.80, 0.74)
+    grayscale: bool = False            # black & white post filter
+    bodycam: bool = False              # bodycam post filter (game only): vignette + soft edge
     vsync: bool = True
     target_fps: float = 60.0
     exposure: float = 1.0
@@ -62,6 +77,16 @@ class QualitySettings:
         self.fog_level = max(0, min(MAX_LEVEL, self.fog_level))
         self.msaa_level = max(0, min(MAX_LEVEL, self.msaa_level))
         self.auto_exposure_level = max(0, min(MAX_LEVEL, self.auto_exposure_level))
+        self.dust_level = max(0, min(MAX_LEVEL, self.dust_level))
+
+    def dust_params(self) -> dict:
+        return {
+            "count": DUST_PARAMS[self.dust_level][0],
+            "size": self.dust_size,
+            "speed": self.dust_speed,
+            "opacity": self.dust_opacity,
+            "color": tuple(self.dust_color),
+        }
 
     @property
     def shadow_map_size(self) -> int:

@@ -43,6 +43,20 @@ layout(std140) uniform Primitives {
     Primitive u_primitives[8];
 };
 
+// Dynamic point + spot lights (the sun stays in the Frame block above). See
+// engine/lights.py for the matching host-side layout.
+struct Light {
+    vec4 position_range;   // xyz world position, w reach/range
+    vec4 color_intensity;  // rgb color, a intensity
+    vec4 direction_type;   // xyz spot aim direction, w type (0 point, 1 spot)
+    vec4 spot_cos;         // x cos(inner half-angle), y cos(outer half-angle)
+};
+
+layout(std140) uniform Lights {
+    ivec4 u_light_header;  // x = count
+    Light u_lights[16];
+};
+
 // Material textures, not scalars: always sampled, never branched on - a
 // material without a real texture gets a 1x1 default encoding its old
 // scalar value (see engine/material_textures.py), the same "one code path,
@@ -61,6 +75,7 @@ uniform float u_shadow_near;         // per-frame: near plane of the scene-fitte
 uniform float u_shadow_depth_range;  // per-frame: far - near of that same frustum
 uniform int u_rt_samples;   // quality-level-driven reflection sample count (settings.py)
 uniform float u_fog_density; // quality-level-driven atmospheric extinction coefficient (settings.py)
+uniform vec3 u_emissive;    // unlit self-illumination (light-source markers); vec3(0) for ordinary geometry
 
 in vec3 v_world_pos;
 in vec3 v_normal;
@@ -523,16 +538,30 @@ void main() {
     vec3 dir_radiance = u_dir_light_color.rgb * u_dir_light_color.a * shadow;
     color += shade_light(N, V, L_dir, dir_radiance, albedo, metallic, roughness, F0);
 
-    // Point light: windowed inverse-square falloff, reaching exactly zero
-    // at its declared range so it has a well-defined radius of effect.
-    vec3 to_point = u_point_light_pos.xyz - v_world_pos;
-    float dist = length(to_point);
-    vec3 L_point = to_point / max(dist, 1e-4);
-    float range = max(u_point_light_pos.a, 1e-4);
-    float window = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
-    float falloff = (window * window) / (dist * dist + 1.0);
-    vec3 point_radiance = u_point_light_color.rgb * u_point_light_color.a * falloff;
-    color += shade_light(N, V, L_point, point_radiance, albedo, metallic, roughness, F0);
+    // Dynamic point + spot lights: windowed inverse-square falloff reaching
+    // exactly zero at each light's range, plus a smooth cone cutoff for spots.
+    int light_count = u_light_header.x;
+    for (int i = 0; i < light_count; i++) {
+        vec3 lp = u_lights[i].position_range.xyz;
+        float lrange = max(u_lights[i].position_range.w, 1e-4);
+        vec3 to_l = lp - v_world_pos;
+        float d = length(to_l);
+        vec3 L = to_l / max(d, 1e-4);
+        float window = clamp(1.0 - pow(d / lrange, 4.0), 0.0, 1.0);
+        float falloff = (window * window) / (d * d + 1.0);
+
+        float spot = 1.0;
+        if (u_lights[i].direction_type.w > 0.5) {
+            vec3 aim = normalize(u_lights[i].direction_type.xyz);
+            float cos_to = dot(-L, aim); // 1 when the fragment is dead-centre in the beam
+            float cos_in = u_lights[i].spot_cos.x;
+            float cos_out = u_lights[i].spot_cos.y;
+            spot = clamp((cos_to - cos_out) / max(cos_in - cos_out, 1e-3), 0.0, 1.0);
+            spot *= spot;
+        }
+        vec3 radiance = u_lights[i].color_intensity.rgb * u_lights[i].color_intensity.a * falloff * spot;
+        color += shade_light(N, V, L, radiance, albedo, metallic, roughness, F0);
+    }
 
     // Hemisphere ambient standing in for indirect/IBL lighting - the only
     // term AO is allowed to modulate (constraint: AO must never darken direct light).
@@ -576,6 +605,10 @@ void main() {
                     + u_dir_light_color.rgb * u_dir_light_color.a * sun_glow * 0.5;
     float fog_amount = 1.0 - exp(-length(v_world_pos - u_cam_pos.xyz) * u_fog_density);
     color = mix(color, fog_color, fog_amount);
+
+    // Unlit self-illumination (light-source markers) added last, so a marker
+    // reads as its own light color regardless of how the scene lights it.
+    color += u_emissive;
 
     frag_color = vec4(color, 1.0);
 }

@@ -213,4 +213,25 @@ Second consommateur du package `engine/`, exactement comme anticipé au §0.2 - 
 - `editing/gizmo.py` : le premier jet du gizmo activait le test de profondeur contre `ctx.screen`, dont le tampon de profondeur n'est en réalité jamais rempli par le pipeline (tout le rendu 3D se fait hors-écran ; seul le triangle plein écran du tonemap touche `ctx.screen`, sans profondeur) - le gizmo échouait donc silencieusement son test de profondeur partout. Corrigé en désactivant le test de profondeur pour le gizmo (trois poignées qui partent d'une origine commune se chevauchent rarement à l'écran, simplification acceptable).
 - Le mécanisme initialement prévu pour corriger le point précédent (masquer les canaux couleur puis vider seulement la profondeur) cassait silencieusement le rendu Dear ImGui de la frame suivante (aucune exception, panneau simplement invisible) - retiré en même temps que le test de profondeur lui-même, qui n'en avait plus besoin.
 
-**Hors scope explicite** (voir aussi le plan d'implémentation) : plusieurs lumières à ombres portées, IBL/cubemap complet, profondeur de champ, sauvegarde/chargement de scène, ajout/suppression d'objets depuis l'éditeur.
+**Hors scope à l'époque** (voir §14, la plupart désormais livrés) : plusieurs lumières, ajout/suppression d'objets depuis l'éditeur, etc.
+
+## 14. Grande passe : lumières multiples, éditeur complet, mode jeu
+
+### 14.1 Rendu (`engine/`)
+- **Lumières multiples** (`engine/lights.py`, `LightsUBO`, binding 2) : tableau de lumières point + spot séparé du soleil (qui reste dans le FrameUBO). Chaque lumière est portée par un `SceneObject` (`LightComponent`) → sélectionnable/déplaçable comme tout objet, avec un marqueur émissif (`Material.emissive`, ampoule/cône) masqué en mode jeu (`SceneObject.marker`). Spot : direction depuis la rotation, cône élargi par l'échelle. `forward.frag` boucle sur ces lumières (falloff windowed + cône lisse pour les spots).
+- **Textures tuilables** : le bruit de valeur/fBm échantillonne désormais un réseau périodique (indices modulo) → couture parfaite là où les UV se répètent (corrige "les textures ne se répètent pas parfaitement"). Nouveau `make_noise_textures` générique (grain/force réglables) piloté depuis les propriétés d'objet (None/Noise).
+- **Poussière** (`engine/dust_pass.py`) : pool de points sprites minuscules dérivant et wrappés autour de la caméra, réglables (densité niveau 0-3, taille, mouvement, opacité, couleur), profondeur testée contre la scène, alpha-blend en HDR.
+- **Filtres** (`tonemap.frag`) : noir & blanc, et bodycam (vignette circulaire + FOV élargi côté caméra + légère aberration chromatique) réservé au jeu.
+- **Ombres plus profondes** (résolutions 1024/2048/4096, pénombre resserrée, soleil un peu plus intense, ambiant abaissé). **Auto-exposition adoucie et clampée** (multiplicateur borné [0.6, 1.8], plancher de luminance) - fini le "tout blanc quand on fixe une lumière" ; **désactivée par défaut dans l'éditeur, active ailleurs**.
+- **Plein écran** par défaut (`Window(fullscreen=True)`), fenêtré via `--windowed`/`--frames`. Correction HiDPI : le curseur est rapporté en pixels framebuffer (clics ImGui/picking corrects sur Retina).
+
+### 14.2 Éditeur (`editing/`)
+- **Barre d'outils** haute centrée à icônes vectorielles procédurales (`editing/icons.py`, aucun asset) : réglages, ajout d'objet (menu déroulant géométrie + lumières), soleil, move/rotate/scale/global-scale, lancer, quitter.
+- **Menu contextuel** au clic droit *immobile* (un clic droit qui bouge = orbite caméra) : propriétés, les 4 modes de transform, copier, coller (grisé si presse-papier vide), supprimer.
+- **Propriétés** (fenêtre à croix de fermeture) : couleur en cercle cliquable, metallic/roughness/reflectivity, texture None/Noise + paramètres, case collision ; pour une lumière : couleur + intensité (+ rotation/échelle pour un spot).
+- **Contour de sélection** orange sobre (fil de fer), **global scale**, **copier/coller/supprimer** (raccourcis Ctrl+C/V, X/Suppr), **panneau Soleil** (rotation/hauteur/intensité/couleur).
+
+### 14.3 Mode jeu (`game/`)
+- **Lancer** (bouton play) passe éditeur→jeu ; **Échap** revient. Personnage FPS (souris + ZQSD, gravité, saut, **pas de vol**), **collisions exactes au maillage** (`game/collision.py` : sphère vs triangles vectorisé numpy, glisse le long des faces → on monte une rampe/cône sans être bloqué), respectant la case collision par objet.
+- **Réglages graphiques du jeu séparés** (instance dédiée, TAB) : les modifier ne touche pas ceux de l'éditeur. Marqueurs de lumière masqués, filtre bodycam disponible ici.
+- `game/` est le troisième consommateur de `engine/` (après `main.py` et `editing/`) : moteur + environnement construit dans l'éditeur + code de jeu, prêt à recevoir une logique de jeu spécifique.

@@ -23,6 +23,10 @@ from .gizmo_geometry import (
 
 SHADER_DIR = Path(__file__).resolve().parent / "shaders"
 
+# Sober orange for the selected object's edge highlight (Blender-like, but
+# understated to match the project's restrained palette).
+SELECTION_OUTLINE_COLOR = (0.92, 0.52, 0.16)
+
 
 def gizmo_world_size(camera: Camera, object_position: glm.vec3,
                       viewport_height: int, target_px: float = 90.0) -> float:
@@ -51,7 +55,7 @@ class Gizmo:
         space quantity - see transform.py) - a deliberate asymmetry, not an
         inconsistency."""
         position = glm.vec3(obj.transform.position)
-        if mode == "scale":
+        if mode in ("scale", "uniform"):
             rotation = obj.transform.rotation * axis_align_rotation(axis)
         else:
             rotation = axis_align_rotation(axis)
@@ -59,6 +63,21 @@ class Gizmo:
         r = glm.mat4_cast(rotation)
         s = glm.scale(glm.mat4(1.0), glm.vec3(apparent_size))
         return t * r * s
+
+    def draw_outline(self, camera: Camera, obj: SceneObject) -> None:
+        """Wireframe the selected object's edges in sober orange, over the
+        shaded scene (Blender's selected-edges cue). Uses GL polygon-line
+        mode (ctx.wireframe) with depth test off, same reasoning as draw()."""
+        ctx = self.ctx
+        ctx.disable(ctx.DEPTH_TEST)
+        view_proj = camera.projection_matrix() * camera.view_matrix()
+        mvp = view_proj * obj.transform.matrix()
+        self.program["u_mvp"].write(mat4_to_array(mvp).tobytes())
+        self.program["u_color"].value = SELECTION_OUTLINE_COLOR
+        self.program["u_highlight"].value = 1.0
+        ctx.wireframe = True
+        obj.mesh.vertex_array(self.program).render()
+        ctx.wireframe = False
 
     def draw(self, camera: Camera, obj: SceneObject, mode: str,
               hovered_axis: int | None, active_axis: int | None, viewport_size: tuple[int, int]) -> None:
@@ -77,7 +96,9 @@ class Gizmo:
         ctx = self.ctx
         apparent_size = gizmo_world_size(camera, glm.vec3(obj.transform.position), viewport_size[1])
         view_proj = camera.projection_matrix() * camera.view_matrix()
-        vao = self.meshes[mode].vertex_array(self.program)
+        # "uniform" (global scale) reuses the scale handle geometry.
+        geom_mode = "scale" if mode == "uniform" else mode
+        vao = self.meshes[geom_mode].vertex_array(self.program)
         for axis in (0, 1, 2):
             model = self.handle_matrix(obj, axis, mode, apparent_size)
             mvp = view_proj * model

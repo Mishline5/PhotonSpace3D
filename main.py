@@ -31,6 +31,7 @@ from engine.renderer import Renderer
 from engine.capabilities import detect as detect_capabilities, describe as describe_capabilities
 from engine.settings import preset_for_capabilities
 from engine.material_textures import apply_material_preset
+from engine.prefabs import make_light, sync_light_marker
 
 CUBE_HALF_EXTENT = 0.5
 PLANE_SIZE = 20.0
@@ -152,6 +153,15 @@ def build_scene(ctx) -> Scene:
     cone.transform.position = (-2.4, 0.45, -1.6)
     apply_material_preset(ctx, cone.material, "concrete", seed=9)
 
+    # A cool-white fill point light (as a real light object, so the editor
+    # can select/move it) - keeps the subtle warm-sun / cool-fill contrast the
+    # original scene had.
+    fill = make_light(ctx, "point_light", scene, position=(2.2, 2.6, 1.5))
+    fill.light.color = (0.7, 0.78, 0.95)
+    fill.light.intensity = 9.0
+    sync_light_marker(fill)
+    scene.add(fill)
+
     return scene
 
 
@@ -159,8 +169,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--windowed", action="store_true", help="Run in a window instead of fullscreen.")
     parser.add_argument("--frames", type=int, default=None,
-                         help="Exit automatically after N frames (dev/CI use).")
+                         help="Exit automatically after N frames (dev/CI use; implies windowed).")
     parser.add_argument("--screenshot", type=str, default=None,
                          help="Save a PNG of the last rendered frame to this path before exiting.")
     parser.add_argument("--shadows", type=int, default=None, help="Override the shadow level (0-3).")
@@ -175,7 +186,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    window = Window(args.width, args.height, "3D Engine")
+    fullscreen = not (args.windowed or args.frames is not None)
+    window = Window(args.width, args.height, "3D Engine", fullscreen=fullscreen)
     ctx = window.ctx
 
     caps = detect_capabilities(ctx)

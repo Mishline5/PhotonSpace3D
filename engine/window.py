@@ -30,6 +30,11 @@ class Input:
         self._first_mouse = True
         self.mouse_buttons_down: set[int] = set()
         self.scroll_delta = 0.0
+        # GLFW reports the cursor in window points; the rest of the engine
+        # (ImGui display_size, picking viewport) works in framebuffer pixels,
+        # which are 2x on a Retina display. Scale here so mouse_pos/mouse_delta
+        # are always in framebuffer pixels - a no-op (1.0) on non-HiDPI.
+        self.cursor_scale = (1.0, 1.0)
 
     def _on_key(self, window, key, scancode, action, mods) -> None:
         if action == glfw.PRESS:
@@ -39,6 +44,8 @@ class Input:
             self._down.discard(key)
 
     def _on_cursor_pos(self, window, x, y) -> None:
+        x *= self.cursor_scale[0]
+        y *= self.cursor_scale[1]
         if self._first_mouse:
             self.mouse_pos = (x, y)
             self._first_mouse = False
@@ -81,7 +88,8 @@ class Input:
 
 
 class Window:
-    def __init__(self, width: int = 1280, height: int = 720, title: str = "3D Engine") -> None:
+    def __init__(self, width: int = 1280, height: int = 720, title: str = "3D Engine",
+                 fullscreen: bool = False) -> None:
         if not glfw.init():
             raise RuntimeError("glfw.init() failed")
 
@@ -92,7 +100,18 @@ class Window:
         glfw.window_hint(glfw.SAMPLES, 0)  # engine does its own HDR/AO passes, no MSAA
         glfw.window_hint(glfw.DOUBLEBUFFER, True)
 
-        self.handle = glfw.create_window(width, height, title, None, None)
+        monitor = None
+        if fullscreen:
+            monitor = glfw.get_primary_monitor()
+            if monitor:
+                mode = glfw.get_video_mode(monitor)
+                width, height = mode.size.width, mode.size.height
+                glfw.window_hint(glfw.RED_BITS, mode.bits.red)
+                glfw.window_hint(glfw.GREEN_BITS, mode.bits.green)
+                glfw.window_hint(glfw.BLUE_BITS, mode.bits.blue)
+                glfw.window_hint(glfw.REFRESH_RATE, mode.refresh_rate)
+
+        self.handle = glfw.create_window(width, height, title, monitor, None)
         if not self.handle:
             glfw.terminate()
             raise RuntimeError(
@@ -112,9 +131,17 @@ class Window:
         self.framebuffer_size = glfw.get_framebuffer_size(self.handle)
         self._resize_pending = False
         glfw.set_framebuffer_size_callback(self.handle, self._on_framebuffer_size)
+        self._update_cursor_scale()
 
         self._vsync = True
         glfw.swap_interval(1)
+
+    def _update_cursor_scale(self) -> None:
+        """Ratio of framebuffer pixels to window points (2.0 on Retina, 1.0
+        elsewhere) - so Input reports the cursor in framebuffer pixels."""
+        ww, wh = glfw.get_window_size(self.handle)
+        fw, fh = self.framebuffer_size
+        self.input.cursor_scale = (fw / max(ww, 1), fh / max(wh, 1))
 
     def _on_framebuffer_size(self, window, width, height) -> None:
         # No GL calls in a GLFW callback - just record the new size. The
@@ -122,6 +149,7 @@ class Window:
         # also collapses a drag's many callback firings into one reallocation.
         self._resize_pending = True
         self.framebuffer_size = (width, height)
+        self._update_cursor_scale()
 
     def poll_resize(self) -> tuple[int, int] | None:
         """Return the new (width, height) once after a resize, else None.

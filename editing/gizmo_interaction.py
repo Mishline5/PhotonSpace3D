@@ -108,7 +108,7 @@ class DragState:
         self.start_scale = glm.vec3(obj.transform.scale)
         self.pivot = glm.vec3(obj.transform.position)
 
-        if mode == "scale":
+        if mode in ("scale", "uniform"):
             self.axis_dir = glm.normalize(obj.transform.rotation * AXIS_WORLD_DIR[axis])
         else:
             self.axis_dir = AXIS_WORLD_DIR[axis]
@@ -154,6 +154,16 @@ class DragState:
             new_scale = list(self.start_scale)
             new_scale[self.axis] = max(0.01, self.start_scale[self.axis] * (1.0 + scale_delta))
             self.obj.transform.scale = tuple(new_scale)
+
+        elif self.mode == "uniform":
+            # Global scale: one handle's drag scales all three axes equally.
+            delta = glm.dot(current_hit - self.start_hit, self.axis_dir)
+            factor = max(0.05, 1.0 + delta / max(self.apparent_size_at_start, 1e-4))
+            self.obj.transform.scale = (
+                max(0.01, self.start_scale.x * factor),
+                max(0.01, self.start_scale.y * factor),
+                max(0.01, self.start_scale.z * factor),
+            )
 
 
 def _pick_ray(camera: Camera, mouse_pos: tuple[float, float],

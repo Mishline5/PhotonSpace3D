@@ -48,6 +48,14 @@ class Mesh:
         # to fit the shadow frustum to the scene instead of a fixed constant.
         self.local_min = vertices["position"].min(axis=0)
         self.local_max = vertices["position"].max(axis=0)
+        # CPU-side copies of the local-space positions and triangle indices,
+        # kept for game-mode mesh collision (game/collision.py tests the
+        # character sphere against these exact triangles so walking up a
+        # rotated cone reads as a ramp, not a wall). Small and immutable -
+        # the geometry is uploaded once and never changes, so this is a
+        # one-time cost, not per-frame bandwidth.
+        self.local_positions = np.ascontiguousarray(vertices["position"], dtype=np.float32)
+        self.triangle_indices = np.ascontiguousarray(indices, dtype=np.uint32)
         self.vbo = ctx.buffer(vertices.tobytes())
         index_dtype = np.uint32 if len(vertices) > 0xFFFF else np.uint16
         self.ibo = ctx.buffer(indices.astype(index_dtype).tobytes())

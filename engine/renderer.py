@@ -24,7 +24,9 @@ from .shadow_pass import ShadowPass
 from .prepass import PrepassTarget
 from .ssao_pass import SSAOPass, AO_TEXTURE_UNIT
 from .rt_primitives import RTPrimitivesUBO
+from .lights import LightsUBO
 from .volumetric_pass import VolumetricPass
+from .dust_pass import DustPass
 from .exposure_pass import ExposurePass
 from .fullscreen import FullscreenPass
 from .shader import load_program
@@ -64,6 +66,8 @@ class Renderer:
         self.material_textures = MaterialTextures(ctx)
         self.rt_primitives = RTPrimitivesUBO(ctx)
         RTPrimitivesUBO.bind_to_program(self.forward_program)
+        self.lights_ubo = LightsUBO(ctx)
+        LightsUBO.bind_to_program(self.forward_program)
 
         self.shadow_pass = ShadowPass(ctx)
         self.prepass = PrepassTarget(ctx, framebuffer_size)
@@ -78,6 +82,7 @@ class Renderer:
         self.hdr = HDRTarget(ctx, framebuffer_size)
         self.msaa = MSAATarget(ctx, framebuffer_size, self.settings.msaa_samples)
         self.volumetric_pass = VolumetricPass(ctx, self.hdr.color)
+        self.dust_pass = DustPass(ctx, self.hdr)
         self.exposure_pass = ExposurePass(ctx, framebuffer_size, self.settings.autoexposure_capture_shift)
         self.gpu_timer = GPUFrameTimer(ctx)
 
@@ -108,7 +113,8 @@ class Renderer:
         self.msaa.set_samples(s.msaa_samples)
         self.exposure_pass.set_capture_size(self.hdr.size, s.autoexposure_capture_shift)
 
-    def render(self, scene: Scene, camera: Camera, time_s: float, dt_s: float) -> None:
+    def render(self, scene: Scene, camera: Camera, time_s: float, dt_s: float,
+               draw_markers: bool = True) -> None:
         ctx = self.ctx
         self._apply_settings()
         s = self.settings
@@ -117,7 +123,6 @@ class Renderer:
         proj = camera.projection_matrix()
         view_proj = proj * view
         dl = scene.directional_light
-        pl = scene.point_lights[0]
         bounds_min, bounds_max = scene.world_bounds()
         shadow_frustum = self.shadow_pass.fit_frustum(dl.direction, bounds_min, bounds_max)
         light_view_proj = shadow_frustum.view_proj
@@ -128,19 +133,24 @@ class Renderer:
         self.forward_program["u_shadow_near"].value = shadow_frustum.near
         self.forward_program["u_shadow_depth_range"].value = shadow_frustum.far - shadow_frustum.near
         al = scene.ambient_light
+        # Point-light slots in the shared FrameUBO are now unused (dynamic
+        # lights live in the Lights UBO, see below) - write zeros to keep the
+        # std140 layout intact for prepass/volumetric without reintroducing a
+        # single hard-coded point light.
         self.frame_ubo.write(
             view=view, proj=proj, view_proj=view_proj, light_view_proj=light_view_proj,
             cam_pos=camera.position,
             dir_light_dir=glm.vec3(*dl.direction), dir_light_color=dl.color,
             dir_light_intensity=dl.intensity, dir_light_softness=dl.softness,
-            point_light_pos=glm.vec3(*pl.position), point_light_range=pl.range,
-            point_light_color=pl.color, point_light_intensity=pl.intensity,
+            point_light_pos=glm.vec3(0.0), point_light_range=1.0,
+            point_light_color=(0.0, 0.0, 0.0), point_light_intensity=0.0,
             ambient_sky_color=al.sky_color, ambient_ground_color=al.ground_color,
             ambient_intensity=al.intensity,
             time_s=time_s, dt_s=dt_s, screen_w=self.size[0], screen_h=self.size[1],
             ao_enabled=s.ssao_level > 0, shadows_enabled=s.shadow_level > 0,
             rt_enabled=s.rt_level > 0,
         )
+        self.lights_ubo.update(scene.collect_lights())
 
         # Everything from here down is GPU work for this frame, timed as one
         # whole-frame span (see gpu_timing.py for why not one query per pass).
@@ -175,6 +185,10 @@ class Renderer:
             prog = self.forward_program
             mat_tex = self.material_textures
             for obj in scene.iter_visible():
+                # Marker chrome (light bulbs/cones) is editor-only: skip it
+                # when the same scene is rendered in game mode.
+                if obj.marker and not draw_markers:
+                    continue
                 model = obj.transform.matrix()
                 mat = obj.material
                 prog["u_model"].write(mat4_to_array(model).tobytes())
@@ -184,6 +198,7 @@ class Renderer:
                 (mat.metallic_map or mat_tex.get_or_create("metallic", mat.metallic)).use(location=METALLIC_MAP_UNIT)
                 (mat.normal_map or mat_tex.default_normal).use(location=NORMAL_MAP_UNIT)
                 prog["u_reflectivity"].value = mat.reflectivity
+                prog["u_emissive"].value = tuple(mat.emissive) if mat.emissive is not None else (0.0, 0.0, 0.0)
                 obj.mesh.vertex_array(prog).render()
 
             if msaa_active:
@@ -194,6 +209,12 @@ class Renderer:
                 self.volumetric_pass.render(
                     self.hdr.depth, self.shadow_pass.depth, glm.inverse(view_proj),
                     s.volumetric_steps, self.size,
+                )
+
+            # --- dust particles: tiny alpha-blended motes drifting in the air ---
+            if s.dust_level > 0:
+                self.dust_pass.render(
+                    view_proj, glm.vec3(camera.position), time_s, self.size, s.dust_params(),
                 )
 
             # --- auto-exposure: reads the finished HDR frame, entirely GPU-side ---
@@ -207,4 +228,6 @@ class Renderer:
             self.exposure_pass.adapted_luminance.use(location=1)
             self.tonemap_program["u_exposure"].value = s.exposure
             self.tonemap_program["u_use_auto_exposure"].value = self.exposure_pass.enabled
+            self.tonemap_program["u_grayscale"].value = bool(s.grayscale)
+            self.tonemap_program["u_bodycam"].value = bool(s.bodycam)
             self.tonemap_pass.draw()
