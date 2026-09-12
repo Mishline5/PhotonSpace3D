@@ -50,6 +50,20 @@ float shadow_at(vec3 world_pos) {
 void main() {
     float device_depth = texture(u_depth_map, v_uv).r;
 
+    // A pixel where the forward pass drew no geometry keeps the depth
+    // target's cleared value (1.0, the far plane) - marching a ray all the
+    // way out to the 100-unit far clip with nothing to occlude it saturates
+    // the Beer-Lambert term below to ~1 (mostly-unoccluded, "lit" whenever
+    // it's outside the light's own shadow frustum) and paints the entire
+    // empty sky at near-full light color instead of contributing nothing.
+    // No skybox exists in this minimal demo (see forward.frag's
+    // trace_reflection escaped-ray comment) - "nothing there" must mean "no
+    // volumetric contribution", not "an unbounded lit path".
+    if (device_depth >= 0.9999) {
+        frag_color = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
     vec4 near_clip = vec4(v_uv * 2.0 - 1.0, -1.0, 1.0);
     vec4 far_clip = vec4(v_uv * 2.0 - 1.0, device_depth * 2.0 - 1.0, 1.0);
     vec4 near_world4 = u_inv_view_proj * near_clip;

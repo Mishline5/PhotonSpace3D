@@ -8,13 +8,20 @@ casts shadows - point-light shadows would need a cube map (or
 dual-paraboloid) per light, real extra complexity for a second light this
 minimal demo scene doesn't need; see design_report.md.
 
-The light's view/projection is a fixed orthographic box centered on the
-world origin, generously sized to cover this demo's ground plane - not
-fitted to the scene's actual current bounding box each frame. A fixed box is
-simpler and fully correct for a scene that stays deliberately small and
-centered near the origin (documented limitation, see design_report.md).
+The light's view/projection is now fit to the scene's own bounding SPHERE
+(Scene.world_bounds(), recomputed every frame - cheap CPU matrix/vector math
+at this object count) rather than a fixed constant box. A bounding sphere
+(not a tight per-frame OBB) is a deliberate, documented simplification:
+rotation-invariant (no popping as objects move/rotate) and simple, at the
+cost of some shadow-map texel density a tighter fit would have recovered -
+see design_report.md. This is a genuinely different invariant from the map
+*resolution* above: the frustum's extent is recomputed every frame (cheap),
+the map's pixel dimensions are not (expensive GPU realloc) - don't conflate
+the two when reading this file.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import glm
 import moderngl
@@ -22,9 +29,17 @@ import moderngl
 from .shader import load_program
 from .gl_math import mat4_to_array
 
-ORTHO_HALF_EXTENT = 8.0
-LIGHT_DISTANCE = 15.0
-NEAR, FAR = 0.5, 40.0
+# Floor under the fitted radius so a tiny/empty scene never collapses to a
+# degenerate near-zero frustum (e.g. before any object has been added).
+MIN_ORTHO_RADIUS = 1.0
+
+
+@dataclass
+class ShadowFrustum:
+    view_proj: glm.mat4
+    near: float
+    far: float
+    radius: float  # world-space bounding-sphere radius the frustum was fit to - PCSS needs this for penumbra scale
 
 
 class ShadowPass:
@@ -55,16 +70,26 @@ class ShadowPass:
             self.depth.release()
 
     @staticmethod
-    def light_view_proj(light_direction) -> glm.mat4:
+    def fit_frustum(light_direction, bounds_min: glm.vec3, bounds_max: glm.vec3) -> ShadowFrustum:
+        """Orthographic frustum tightly enclosing the given world-space AABB's
+        bounding sphere, viewed from the directional light. See the module
+        docstring for why a sphere (not a tight OBB) is the deliberate choice
+        here."""
         light_dir = glm.normalize(glm.vec3(*light_direction))
         up = glm.vec3(0.0, 1.0, 0.0)
         if abs(glm.dot(light_dir, up)) > 0.99:
             up = glm.vec3(1.0, 0.0, 0.0)
-        eye = -light_dir * LIGHT_DISTANCE
-        view = glm.lookAt(eye, glm.vec3(0.0), up)
-        proj = glm.ortho(-ORTHO_HALF_EXTENT, ORTHO_HALF_EXTENT,
-                          -ORTHO_HALF_EXTENT, ORTHO_HALF_EXTENT, NEAR, FAR)
-        return proj * view
+
+        center = (bounds_min + bounds_max) * 0.5
+        radius = max(glm.length(bounds_max - bounds_min) * 0.5, MIN_ORTHO_RADIUS)
+        light_distance = radius * 2.0 + 1.0
+
+        eye = center - light_dir * light_distance
+        view = glm.lookAt(eye, center, up)
+        near = 0.1
+        far = light_distance + radius + 2.0  # generous margin past the sphere's far side
+        proj = glm.ortho(-radius, radius, -radius, radius, near, far)
+        return ShadowFrustum(proj * view, near, far, radius)
 
     def render(self, scene, light_view_proj: glm.mat4) -> None:
         self.fbo.use()

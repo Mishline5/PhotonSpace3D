@@ -37,14 +37,18 @@ class BenchConfig:
     ssao: int
     rt: int
     volumetric: int
+    fog: int = 0
+    msaa: int = 0
 
 
 CONFIGS = [
     BenchConfig("baseline (PBR only)", 0, 0, 0, 0),
-    BenchConfig("+ shadow mapping", BENCH_LEVEL, 0, 0, 0),
+    BenchConfig("+ shadow mapping (PCSS)", BENCH_LEVEL, 0, 0, 0),
     BenchConfig("+ SSAO", BENCH_LEVEL, BENCH_LEVEL, 0, 0),
     BenchConfig("+ hybrid ray-traced reflections", BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL, 0),
     BenchConfig("+ volumetric light shafts", BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL),
+    BenchConfig("+ fog", BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL, fog=BENCH_LEVEL),
+    BenchConfig("+ MSAA", BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL, BENCH_LEVEL, fog=BENCH_LEVEL, msaa=BENCH_LEVEL),
 ]
 
 
@@ -57,6 +61,7 @@ def run_config(window: Window, scene, camera: Camera, config: BenchConfig) -> di
     settings = QualitySettings(
         shadow_level=config.shadows, ssao_level=config.ssao,
         rt_level=config.rt, volumetric_level=config.volumetric,
+        fog_level=config.fog, msaa_level=config.msaa,
     )
     renderer = Renderer(window.ctx, window.framebuffer_size, settings)
 

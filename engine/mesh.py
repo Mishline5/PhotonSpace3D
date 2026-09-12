@@ -43,6 +43,11 @@ class Mesh:
     def __init__(self, ctx: moderngl.Context, vertices: np.ndarray, indices: np.ndarray) -> None:
         assert vertices.dtype == VERTEX_DTYPE
         self.ctx = ctx
+        # Local-space AABB corners, computed once (geometry never changes
+        # after upload - see the module docstring) - used by Scene.world_bounds
+        # to fit the shadow frustum to the scene instead of a fixed constant.
+        self.local_min = vertices["position"].min(axis=0)
+        self.local_max = vertices["position"].max(axis=0)
         self.vbo = ctx.buffer(vertices.tobytes())
         index_dtype = np.uint32 if len(vertices) > 0xFFFF else np.uint16
         self.ibo = ctx.buffer(indices.astype(index_dtype).tobytes())

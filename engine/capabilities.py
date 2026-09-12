@@ -29,6 +29,7 @@ class GraphicsCapabilities:
     gl_version: str
     tier: str  # TIER_LOW | TIER_MEDIUM | TIER_HIGH
     max_texture_size: int
+    max_msaa_samples: int
     is_apple_silicon: bool  # informational: this engine's GL 4.1 ceiling applies here specifically
 
 
@@ -37,10 +38,11 @@ def detect(ctx: moderngl.Context) -> GraphicsCapabilities:
     renderer = str(ctx.info.get("GL_RENDERER") or "")
     version = str(ctx.info.get("GL_VERSION") or "")
     max_tex = int(ctx.info.get("GL_MAX_TEXTURE_SIZE") or 4096)
+    max_msaa = int(ctx.info.get("GL_MAX_SAMPLES") or 4)
 
     is_apple = "apple" in vendor.lower() or "apple" in renderer.lower()
     tier = _classify(vendor, renderer)
-    return GraphicsCapabilities(vendor, renderer, version, tier, max_tex, is_apple)
+    return GraphicsCapabilities(vendor, renderer, version, tier, max_tex, max_msaa, is_apple)
 
 
 def _classify(vendor: str, renderer: str) -> str:

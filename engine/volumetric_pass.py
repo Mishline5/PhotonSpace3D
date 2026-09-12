@@ -28,7 +28,19 @@ class VolumetricPass:
         FrameUBO.bind_to_program(self.program)
         self.program["u_depth_map"].value = SCENE_DEPTH_UNIT
         self.program["u_shadow_map"].value = SHADOW_MAP_UNIT
-        self.program["u_density"].value = 0.02
+        # Recalibrated down from an original 0.02 (tuned against a small
+        # ~10-12 world-unit demo scene) after the Phase 3 scene expansion
+        # added real geometry (walls) ~15-20 units out: this raymarch
+        # integrates lit-ness over the *entire* camera-to-surface segment
+        # with no notion of "how close to an occluder's edge", so any long,
+        # mostly-unoccluded ray (a distant wall with clear air in front of
+        # it, not just an empty sky) accumulates a large lit_path_length
+        # regardless of whether there's a nearby shadow to actually catch
+        # light on - found by reading back raw HDR values and bisecting
+        # which pass contributed the wall's unexpectedly high brightness.
+        # 0.003 keeps that same-shaped effect visible near the shadowed
+        # prop cluster without washing out anything merely far away.
+        self.program["u_density"].value = 0.003
         self.fullscreen = FullscreenPass(ctx, self.program)
 
         # Color-only view of the HDR target's color attachment: this pass's

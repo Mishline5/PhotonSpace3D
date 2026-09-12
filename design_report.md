@@ -129,7 +129,50 @@ Vérification du limiteur de framerate : configuration de base avec le plafond �
 
 Lecture : même cumulées à leur niveau de qualité *maximal*, toutes les fonctionnalités tiennent à 120 FPS sur un GPU classé `medium` par ce moteur lui-même — largement au-dessus de la fréquence d'affichage courante, avec une marge confortable avant d'atteindre un GPU `high` (RTX 4070 Ti). Le RT hybride est devenu plus coûteux que dans une version antérieure de ce rapport du fait de l'échantillonnage multiple pour les réflexions douces (§5) - un compromis qualité/coût désormais explicite et réglable par niveau plutôt qu'implicite.
 
-## 10. Limites connues
+## 10. Passe de réalisme (post-rapport initial)
+
+Six extensions au pipeline forward, chacune vérifiée indépendamment (`main.py --screenshot` avant/après, `benchmark.py` pour le coût GPU) :
+
+- **Compensation d'énergie GGX** (`forward.frag`) : fit fermé de Karis (`env_brdf_approx`/`energy_compensation`) corrigeant la perte d'énergie du GGX simple-scatter à forte rugosité - toujours actif, pas de niveau de qualité (corrige un terme, ne coûte presque rien).
+- **Ambiant hémisphérique** (`Scene.ambient_light`, deux couleurs ciel/sol mélangées par `N.y`) remplaçant l'ancienne constante plate `vec3(0.05)*albedo`, dans `forward.frag` et dans `trace_reflection`. `FrameUBO` passe de 368 à 400 octets (deux `vec4` ajoutés strictement après `u_flags`, jamais avant, pour que `prepass.vert`/`volumetric.frag` - qui déclarent le même bloc `Frame` mais s'arrêtent à `u_flags` - restent corrects sans être modifiés).
+- **Brouillard atmosphérique** (extinction Beer-Lambert sur la distance caméra-fragment, teinte dérivée de l'ambiant + lueur solaire), niveau 0-3 (`FOG_PARAMS`), algébriquement neutre à densité 0.
+- **RT hybride enrichi** : intersection cylindre analytique (`intersect_cylinder_local`, kind=3 dans `RTPrimitive`) - le cylindre de la démo est maintenant réfléchissant/réfléchi ; la réflexion consulte désormais `sample_shadow` au point d'impact (`trace_reflection`) au lieu de lumière directe seule.
+- **Ombres PCSS** remplaçant le PCF à rayon fixe : recherche de bloqueurs + rayon de pénombre proportionnel à la distance bloqueur/récepteur (exact, pas approximatif, car cette shadow map orthographique a une profondeur déjà linéaire en distance monde). Frustum ajusté chaque frame à la sphère englobante de la scène (`Scene.world_bounds`, `ShadowPass.fit_frustum`) plutôt qu'une boîte fixe de 8 unités.
+- **MSAA** (`MSAATarget`, renderbuffers multi-échantillons résolus vers `HDRTarget` avant les passes en aval) : niveau 0/2x/4x/8x, clampé au `GL_MAX_SAMPLES` réel du GPU (4 sur la machine de développement M1 Max - un GPU annoncé "8x" ne l'obtiendrait donc pas forcément partout).
+
+**Bug préexistant trouvé et corrigé en vérifiant le brouillard** : un pixel de ciel vide (sans géométrie, profondeur nettoyée au plan lointain) faisait marcher le rayon volumétrique jusqu'à ~94 unités sans occultation trouvée, saturant le terme de Beer-Lambert à ~1 et peignant tout le ciel vide à la couleur de la lumière directionnelle en pleine intensité dès que le volumétrique était actif - `volumetric.frag` retourne maintenant une contribution nulle quand la profondeur lue est au plan lointain (`>= 0.9999`), puisqu'il n'y a rien là pour diffuser la lumière (pas de skybox dans cette démo).
+
+Benchmark (mêmes conditions que §9, tout au niveau 3, cumulatif) :
+
+| Configuration | FPS | GPU ms/frame |
+|---|---|---|
+| Base (PBR seul) | 450.7 | 0.538 |
+| + ombres (PCSS) | 234.0 | 2.743 |
+| + SSAO | 189.5 | 3.549 |
+| + RT hybride (avec ombre au point d'impact) | 118.5 | 6.651 |
+| + volumétrique | 112.7 | 7.481 |
+| + brouillard | 113.0 | 7.479 |
+| + MSAA | 101.2 | 8.140 |
+
+Même avec absolument tout au niveau 3 simultanément, la scène reste au-dessus de 100 FPS sur ce GPU `medium`. Le coût le plus notable est l'ombre au point d'impact de la réflexion RT (§ci-dessus) : elle ajoute une recherche PCSS complète par échantillon de réflexion (jusqu'à 4× au niveau 3), identifié comme le risque de performance principal de cette passe et confirmé mesurable (RT hybride : 4.6ms auparavant, 6.65ms maintenant) mais encore largement acceptable.
+
+## 10bis. Textures PBR procédurales et scène enrichie
+
+**Textures** (`engine/procedural_textures.py`, `engine/material_textures.py`) : bruit de valeur/Worley/fBm en numpy (jamais de fichier lu ni téléchargé), quatre présets (béton, métal brossé, caoutchouc, plâtre) donnant albedo/roughness/(metallic)/normal. `Material` (`scene.py`) gagne des champs `*_map` optionnels ; sans texture assignée, `MaterialTextures` fournit une texture 1x1 encodant le scalaire existant, pour que `forward.frag` garde un seul chemin de code (toujours un sampler, jamais de branche). Normal mapping par dérivées d'écran (`dFdx`/`dFdy`, `cotangent_frame`) plutôt qu'un attribut tangente sur les vertices - zéro changement à `mesh.py`/`primitives.py`. **Bug trouvé en vérifiant** : `forward.vert` déclarait `in_uv` mais ne le transmettait jamais au fragment shader - corrigé (`out vec2 v_uv`).
+
+**Scène** (`main.py: build_scene()`) : sol 20×20 (était 12×12), deux murs formant un angle (plâtre), plateforme basse, second cylindre ("tambour", échelle non-uniforme radiale-symétrique X=Z pour rester correct sous transformation de normale), cône (visible, pas encore réfléchissant - voir §11). Chaque objet reçoit un vrai jeu de textures procédurales. Nouveau générateur `primitives.make_box(half_extents)` : contrairement à `make_cube` + `Transform.scale`, ses UV sont mises à l'échelle par la taille réelle de chaque face (même convention que `make_plane`) - nécessaire pour que les murs (très étirés) tuilent leur texture à une densité raisonnable au lieu d'étaler un unique cycle de texture sur toute la surface.
+
+**Deux bugs de calibration trouvés en vérifiant visuellement** (la texture du mur restait invisible malgré une génération correcte) :
+- Les murs apparaissaient presque blancs, sans variation visible. Cause réelle : la passe volumétrique (`u_density`, jusqu'ici 0.02, jamais recalibrée) intègre la "quantité de lumière" sur tout le segment caméra→surface sans notion de proximité à un occultant - un mur à ~15-20 unités, avec de l'air dégagé devant, accumulait un `lit_path_length` énorme et saturait le terme de Beer-Lambert près de son maximum, ajoutant une contribution additive massive. Diagnostiqué en lisant directement le buffer HDR linéaire (avant tonemap) et en isolant chaque passe une à une plutôt qu'en devinant. `u_density` recalibré à 0.003.
+- L'ambiant hémisphérique (§10) était plus lumineux en moyenne que l'ancienne constante `0.05` qu'il remplaçait, ce qui poussait plus de surfaces vers la partie compressive de la courbe ACES (où la variation d'albédo devient visuellement imperceptible). `AmbientLight.sky_color`/`ground_color` recalibrés pour retrouver une luminosité totale proche de l'ancienne constante, tout en gardant la variation directionnelle ciel/sol qui est le vrai apport de ce changement.
+
+**Coût mesuré** : la scène enrichie (8 primitives RT au lieu de 3-4, sol/murs réfléchissants plus grands) a fait chuter le RT hybride + ombre au point d'impact sous les 60 FPS non plafonnés à qualité 3 partout (35.7 FPS). Repli déjà anticipé au §10 appliqué : l'ombre PCSS au point d'impact ne s'applique plus qu'à l'échantillon miroir (index 0), pas aux échantillons flous jitterés, ramenant la config "tout au niveau 3" à ~49 FPS. **Le préréglage par défaut (tier medium, niveaux 2) reste à ~82 FPS non plafonné** - le cas "tout au maximum" est désormais un vrai compromis qualité/coût pour du matériel plus modeste, pas une garantie universelle comme au §9.
+
+## 10ter. Auto-exposition
+
+`engine/exposure_pass.py` + `shaders/luminance.frag`/`luminance_adapt.frag` : adaptation à la luminance moyenne de la scène, entièrement sur GPU (pas de lecture CPU, contrairement à `gpu_timing.py` dont la contrainte de blocage est réelle - ici rien ne l'impose). Luminance log2 capturée dans une petite texture (résolution pilotée par niveau de qualité), chaîne de mip générée (`Texture.build_mipmaps()`), lue à son niveau le plus grossier par une passe 1×1 qui mélange avec la valeur adaptée de la frame précédente (ping-pong, lissage exponentiel indépendant du framerate). Le slider d'exposition manuel devient une compensation EV appliquée par-dessus, activable/désactivable (`u_use_auto_exposure`). Limite connue et attendue (pas un bug) : comme tout système d'auto-exposition moyennant la luminance, une scène globalement claire (murs/sol clairs de cette démo) est tirée vers le gris moyen 0.18 et apparaît plus lumineuse qu'en exposition manuelle fixe - le même compromis qu'un appareil photo réel, corrigible via la compensation EV manuelle.
+
+## 11. Limites connues
 
 - **OpenGL 4.1 partout, pas de chemin compute-shader** (§0.1) : décision délibérée pour garder un seul chemin de rendu vérifiable, y compris depuis une machine de développement Apple Silicon. Sur Nvidia/Windows avec GL 4.3+, le moteur fonctionne à l'identique (rien ne dépend d'une absence de 4.3) mais n'exploite pas de compute shader pour autant.
 - **RT limité aux primitives analytiques** (plan, boîte, sphère), pas à des maillages arbitraires ; cylindres/cônes n'y participent pas encore (§5).
@@ -140,7 +183,7 @@ Lecture : même cumulées à leur niveau de qualité *maximal*, toutes les fonct
 - **Shadow map à frustum fixe**, pas ajusté aux bornes réelles de la scène courante.
 - **Pas de culling de face** : négligeable au nombre d'objets de cette démo.
 
-## 11. Comment lancer le projet
+## 12. Comment lancer le projet
 
 ```bash
 python3.12 -m venv .venv
@@ -150,6 +193,24 @@ python3.12 -m venv .venv
 ./.venv/bin/python benchmark.py            # mesures avant/après
 ```
 
-Contrôles : ZQSD/WASD + souris pour la caméra, Espace/Ctrl pour monter/descendre, Shift pour sprinter, **TAB** pour ouvrir/fermer le panneau de réglages (ombres/SSAO/RT/volumétrique, niveaux 0-3, exposition, V-Sync), Échap pour fermer le panneau ou quitter.
+`main.py` : ZQSD/WASD + souris pour la caméra, Espace/Ctrl pour monter/descendre, Shift pour sprinter, Échap pour quitter - un exemple d'usage minimal du moteur, sans aucune UI d'édition (voir §13).
 
-Options de développement de `main.py` (utilisées pour produire les captures de vérification pendant le développement, cf. `engine/capture.py`) : `--frames N` (quitte automatiquement après N frames), `--screenshot chemin.png`, `--shadows`/`--ssao`/`--rt`/`--volumetric N` (force un niveau 0-3 au démarrage), `--settings-open`, `--width`/`--height`.
+Options de développement de `main.py`/`edit.py` (utilisées pour produire les captures de vérification pendant le développement, cf. `engine/capture.py`) : `--frames N` (quitte automatiquement après N frames), `--screenshot chemin.png`, `--shadows`/`--ssao`/`--rt`/`--volumetric`/`--fog`/`--msaa`/`--auto-exposure N` (force un niveau 0-3 au démarrage, `main.py` seulement), `--width`/`--height`.
+
+## 13. Module `editing/` : outil interactif façon Blender
+
+Second consommateur du package `engine/`, exactement comme anticipé au §0.2 - `engine/` ne garde que le rendu/la gestion (plus aucune dépendance à `pyimgui` : `engine/settings_ui.py` a été supprimé, sa logique déménagée dans `editing/ui.py`). Point d'entrée : `edit.py` à la racine, miroir structurel de `main.py`.
+
+- **Sélection** (`editing/picking.py`) : rayon caméra→pixel, intersections analytiques dupliquées volontairement en Python/PyGLM (miroir de celles de `forward.frag` - aucun partage de code GLSL↔Python n'étant possible). `ensure_pickable()` donne une boîte englobante aux objets sans `RTPrimitive`.
+- **Gizmos** (`editing/gizmo_geometry.py`, `gizmo.py`, `gizmo_interaction.py`) : flèches (translation), tores triangulés (rotation - pas de `GL_LINE_STRIP`, `glLineWidth` n'étant pas fiable en core profile), poignées cubiques (échelle), taille apparente constante à l'écran (formule exacte via le FOV, pas une approximation). Survol par distance au segment/polyligne projeté en 2D, pas un raycast 3D contre la géométrie du gizmo. Drag contraint à un axe via intersection rayon/plan (plan figé au début du drag). Déplacement/rotation en axes monde, échelle en axes locaux de l'objet (consequence de l'ordre `T*R*S`, pas une incohérence).
+- **UI** (`editing/ui.py`) : panneau Quality (déplacé de `engine/settings_ui.py`) + panneau Properties (transform, matériau, boutons de préset de texture procédurale) toujours visible, un seul contexte Dear ImGui partagé.
+- **Contrôles** (`edit.py`) : curseur jamais capturé (nécessaire pour cliquer précisément) ; clic droit maintenu = regard caméra (WASD reste actif sans condition) ; clic gauche = sélection/drag de gizmo ; G/R/S = mode translate/rotate/scale (convention Blender) ; TAB = panneau Quality.
+
+**Vérification** : comportementale (pas seulement visuelle) - simulation de clic/drag via manipulation directe de `Window.input` puis lecture de l'état résultant (`session.selection`, `obj.transform.*`), confirmant que la sélection et les trois modes de drag modifient exactement l'axe/la propriété attendue et rien d'autre.
+
+**Trois bugs trouvés en vérifiant** (aucun n'était visible par simple inspection du code) :
+- `engine/capture.py` : `ctx.screen.read()` laisse une erreur GL fantôme (reproduite avec un contexte ModernGL minimal, sans rien de ce projet - caractéristique ModernGL/pilote sur cette plateforme, pas un bug de ce moteur) qui restait silencieuse jusqu'à ce qu'un appel PyOpenGL avec vérification stricte (le rendu Dear ImGui) la fasse remonter en exception, sur n'importe quelle frame suivant une capture d'écran dans le même processus. Corrigé en purgeant l'erreur après lecture.
+- `editing/gizmo.py` : le premier jet du gizmo activait le test de profondeur contre `ctx.screen`, dont le tampon de profondeur n'est en réalité jamais rempli par le pipeline (tout le rendu 3D se fait hors-écran ; seul le triangle plein écran du tonemap touche `ctx.screen`, sans profondeur) - le gizmo échouait donc silencieusement son test de profondeur partout. Corrigé en désactivant le test de profondeur pour le gizmo (trois poignées qui partent d'une origine commune se chevauchent rarement à l'écran, simplification acceptable).
+- Le mécanisme initialement prévu pour corriger le point précédent (masquer les canaux couleur puis vider seulement la profondeur) cassait silencieusement le rendu Dear ImGui de la frame suivante (aucune exception, panneau simplement invisible) - retiré en même temps que le test de profondeur lui-même, qui n'en avait plus besoin.
+
+**Hors scope explicite** (voir aussi le plan d'implémentation) : plusieurs lumières à ombres portées, IBL/cubemap complet, profondeur de champ, sauvegarde/chargement de scène, ajout/suppression d'objets depuis l'éditeur.

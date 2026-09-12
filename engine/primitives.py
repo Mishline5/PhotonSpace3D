@@ -46,6 +46,44 @@ def make_cube(half_extent: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
     return vertices, indices
 
 
+def make_box(half_extents: tuple[float, float, float] = (0.5, 0.5, 0.5)) -> tuple[np.ndarray, np.ndarray]:
+    """General (non-cubic) box, flat-shaded like make_cube (24 verts, 36
+    indices). UVs are scaled by each face's own world-space dimensions (1
+    world unit = 1 UV unit - the same tiling convention make_plane already
+    uses for the ground), not a fixed 0..1 per face - so a texture applied
+    to a large, non-uniformly-sized box (e.g. a wall) repeats at a sane,
+    roughly constant density instead of smearing one full texture cycle
+    across the whole face regardless of size. Use this - not
+    make_cube + Transform.scale - for any box whose surface should show a
+    tiled procedural texture at something like its real size; make_cube's
+    UVs stay 0..1 per face no matter how a Transform later scales it, since
+    scale never touches UV coordinates."""
+    hx, hy, hz = half_extents
+    faces = [
+        ((0.0, 0.0, 1.0), [(-hx, -hy, hz), (hx, -hy, hz), (hx, hy, hz), (-hx, hy, hz)], (2 * hx, 2 * hy)),
+        ((0.0, 0.0, -1.0), [(hx, -hy, -hz), (-hx, -hy, -hz), (-hx, hy, -hz), (hx, hy, -hz)], (2 * hx, 2 * hy)),
+        ((1.0, 0.0, 0.0), [(hx, -hy, hz), (hx, -hy, -hz), (hx, hy, -hz), (hx, hy, hz)], (2 * hz, 2 * hy)),
+        ((-1.0, 0.0, 0.0), [(-hx, -hy, -hz), (-hx, -hy, hz), (-hx, hy, hz), (-hx, hy, -hz)], (2 * hz, 2 * hy)),
+        ((0.0, 1.0, 0.0), [(-hx, hy, hz), (hx, hy, hz), (hx, hy, -hz), (-hx, hy, -hz)], (2 * hx, 2 * hz)),
+        ((0.0, -1.0, 0.0), [(-hx, -hy, -hz), (hx, -hy, -hz), (hx, -hy, hz), (-hx, -hy, hz)], (2 * hx, 2 * hz)),
+    ]
+
+    vertices = np.zeros(24, dtype=VERTEX_DTYPE)
+    indices = np.zeros(36, dtype=np.uint32)
+    vi = 0
+    ii = 0
+    for normal, corners, (uw, uh) in faces:
+        uvs = [(0.0, 0.0), (uw, 0.0), (uw, uh), (0.0, uh)]
+        base = vi
+        for corner, uv in zip(corners, uvs):
+            vertices[vi] = (corner, normal, uv)
+            vi += 1
+        for a, b, c in ((0, 1, 2), (0, 2, 3)):
+            indices[ii:ii + 3] = (base + a, base + b, base + c)
+            ii += 3
+    return vertices, indices
+
+
 def make_plane(size: float = 12.0) -> tuple[np.ndarray, np.ndarray]:
     """Finite quad in the XZ plane, normal +Y. Rendered without face culling
     (see renderer.py), so winding direction doesn't affect visibility."""
@@ -194,6 +232,7 @@ def make_cone(radius: float = 0.5, height: float = 1.0, segments: int = 32) -> t
 
 PRIMITIVE_FACTORIES = {
     "cube": make_cube,
+    "box": make_box,
     "plane": make_plane,
     "sphere": make_uv_sphere,
     "cylinder": make_cylinder,

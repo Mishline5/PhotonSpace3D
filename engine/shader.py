@@ -16,15 +16,21 @@ import moderngl
 SHADER_DIR = Path(__file__).resolve().parent / "shaders"
 
 
-def _read(name: str) -> str:
-    return (SHADER_DIR / name).read_text()
+def _read(name: str, shader_dir: Path) -> str:
+    return (shader_dir / name).read_text()
 
 
-def load_program(ctx: moderngl.Context, vertex: str, fragment: str) -> moderngl.Program:
+def load_program(ctx: moderngl.Context, vertex: str, fragment: str,
+                  shader_dir: Path | None = None) -> moderngl.Program:
+    """`shader_dir` defaults to engine/shaders (SHADER_DIR) - the only
+    consumer that ever passes a different one is editing/, loading its own
+    gizmo shaders from editing/shaders/, so engine/ stays self-contained
+    (nothing inside it ever calls this with a non-default shader_dir)."""
+    directory = shader_dir or SHADER_DIR
     try:
         return ctx.program(
-            vertex_shader=_read(vertex),
-            fragment_shader=_read(fragment),
+            vertex_shader=_read(vertex, directory),
+            fragment_shader=_read(fragment, directory),
         )
     except moderngl.Error as exc:
         raise RuntimeError(f"Shader compile/link failed ({vertex} + {fragment}):\n{exc}") from exc
